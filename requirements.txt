@@ -12,3 +12,9 @@ httpx
 psycopg2-binary
 alembic
 qdrant-client==1.9.2
+
+# --- Optional: OCR fallback for scanned/image PDFs ---
+# Uncomment the two lines below AND install the Tesseract engine binary
+# (https://github.com/tesseract-ocr/tesseract) to enable OCR.
+# pypdfium2
+# pytesseract

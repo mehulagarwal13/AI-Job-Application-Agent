@@ -1,11 +1,11 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.services.file_storage import save_resume_file, compute_file_hash, STORAGE_DIR
 from app.services.text_extraction import extract_text, ExtractionError
 from app.models.resume import ResumeUploadResponse
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.services import resume_repository
 from app.services.resume_parser import parse_resume_text, ParsingError
 from app.services.normalizer import normalize_resume
@@ -33,8 +33,33 @@ router = APIRouter(prefix="/resumes", tags=["resumes"])
 
 MAX_FILE_SIZE_MB = 5
 
+
+def _run_extraction(resume_id: str) -> None:
+    """
+    Background task fired right after upload: extracts text and updates status.
+    Uses its own DB session — the request session is closed by the time this runs.
+    """
+    db = SessionLocal()
+    try:
+        record = resume_repository.get_by_id(db, resume_id)
+        if not record or record.extracted_text:
+            return
+        try:
+            record.extracted_text = extract_text(record.stored_path)
+            record.status = "extracted"
+        except ExtractionError:
+            record.status = "extraction_failed"
+        db.commit()
+    finally:
+        db.close()
+
+
 @router.post("/upload", response_model=ResumeUploadResponse)
-async def upload_resume(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_resume(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
     content = await file.read()
 
     size_mb = len(content) / (1024 * 1024)
@@ -69,6 +94,9 @@ async def upload_resume(file: UploadFile = File(...), db: Session = Depends(get_
         file_hash=file_hash,
     )
 
+    # Kick off extraction automatically — client no longer has to call /extract.
+    background_tasks.add_task(_run_extraction, record.resume_id)
+
     return ResumeUploadResponse(
         resume_id=record.resume_id,
         original_filename=record.original_filename,
@@ -78,22 +106,39 @@ async def upload_resume(file: UploadFile = File(...), db: Session = Depends(get_
     )
 
 
-@router.get("/{resume_id}/extract")
-def extract_resume_text(resume_id: str, db: Session = Depends(get_db)):
+def _extract_resume_text(resume_id: str, db: Session, force: bool = False):
     record = resume_repository.get_by_id(db, resume_id)
     if not record:
         raise HTTPException(status_code=404, detail="Resume not found.")
 
+    # Idempotent: don't re-read the file if we already have text (unless forced).
+    if record.extracted_text and not force:
+        return {"resume_id": resume_id, "extracted_text": record.extracted_text, "cached": True}
+
     try:
         text = extract_text(record.stored_path)
     except ExtractionError as e:
+        record.status = "extraction_failed"
+        db.commit()
         raise HTTPException(status_code=422, detail=str(e))
 
-    # Persist it so Node 4 doesn't need to re-extract every time
     record.extracted_text = text
+    record.status = "extracted"
     db.commit()
 
-    return {"resume_id": resume_id, "extracted_text": text}
+    return {"resume_id": resume_id, "extracted_text": text, "cached": False}
+
+
+@router.post("/{resume_id}/extract")
+def extract_resume_text(resume_id: str, force: bool = False, db: Session = Depends(get_db)):
+    """Extracts text from the stored file (idempotent; pass force=true to re-extract)."""
+    return _extract_resume_text(resume_id, db, force=force)
+
+
+@router.get("/{resume_id}/extract", deprecated=True)
+def extract_resume_text_get(resume_id: str, db: Session = Depends(get_db)):
+    """Deprecated GET alias — kept for backward compatibility. Use POST instead."""
+    return _extract_resume_text(resume_id, db)
 
 
 @router.post("/{resume_id}/parse")
