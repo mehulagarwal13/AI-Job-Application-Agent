@@ -17,6 +17,7 @@ def upsert_job(db: Session, job_dict: dict) -> JobRecord:
         existing.salary_min = job_dict["salary_min"]
         existing.salary_max = job_dict["salary_max"]
         existing.apply_url = job_dict["apply_url"]
+        existing.min_years_required = job_dict["min_years_required"]
         db.commit()
         db.refresh(existing)
         return existing

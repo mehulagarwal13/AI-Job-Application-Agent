@@ -11,4 +11,4 @@ sentence-transformers
 httpx
 psycopg2-binary
 alembic
-qdrant-client==1.92
+qdrant-client==1.9.2

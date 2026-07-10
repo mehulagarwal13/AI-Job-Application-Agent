@@ -16,11 +16,16 @@ def rank_jobs(
     shortlist: list[tuple[JobRecord, float]],
     parsed_resume: ParsedResume,
     resume_summary_text: str,
-    resume_raw_text: str,   
+    resume_raw_text: str,
     location_contains: str | None = None,
     min_salary: int | None = None,
 ) -> list[dict]:
-    filtered = apply_hard_filters(shortlist, location_contains=location_contains, min_salary=min_salary)
+    filtered = apply_hard_filters(
+        shortlist,
+        location_contains=location_contains,
+        min_salary=min_salary,
+        candidate_years_experience=parsed_resume.total_years_experience,
+    )
     top_pool = filtered[:RERANK_POOL_SIZE]
 
     results = []

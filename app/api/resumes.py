@@ -229,6 +229,10 @@ def generate_matches(
             matched_skills=json.loads(r.matched_skills),
             missing_skills=json.loads(r.missing_skills),
             explanation=r.explanation,
+            ats_score=float(r.ats_score) if r.ats_score is not None else 0.0,
+            ats_found_keywords=json.loads(r.ats_found_keywords) if r.ats_found_keywords else [],
+            ats_missing_keywords=json.loads(r.ats_missing_keywords) if r.ats_missing_keywords else [],
+            ats_format_score=float(r.ats_format_score) if r.ats_format_score is not None else 0.0,
             status=r.status,
         ))
 
@@ -262,6 +266,10 @@ def list_matches(resume_id: str, status: str | None = None, db: Session = Depend
             matched_skills=json.loads(r.matched_skills),
             missing_skills=json.loads(r.missing_skills),
             explanation=r.explanation,
+            ats_score=float(r.ats_score) if r.ats_score is not None else 0.0,
+            ats_found_keywords=json.loads(r.ats_found_keywords) if r.ats_found_keywords else [],
+            ats_missing_keywords=json.loads(r.ats_missing_keywords) if r.ats_missing_keywords else [],
+            ats_format_score=float(r.ats_format_score) if r.ats_format_score is not None else 0.0,
             status=r.status,
         ))
 

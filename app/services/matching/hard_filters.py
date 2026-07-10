@@ -5,11 +5,14 @@ def apply_hard_filters(
     scored_jobs: list[tuple[JobRecord, float]],
     location_contains: str | None = None,
     min_salary: int | None = None,
+    candidate_years_experience: float | None = None,
+    experience_buffer: float = 1.0,
 ) -> list[tuple[JobRecord, float]]:
     """
-    Filters out jobs that fail explicit hard constraints, BEFORE any scoring blend.
-    A semantically similar job that fails a hard constraint should never
-    outrank one that passes it, regardless of vector similarity.
+    experience_buffer allows some slack — job postings routinely say "5 years"
+    as a soft preference, not a hard cutoff, and candidates with slightly less
+    still regularly get interviews. A candidate is excluded only if their
+    experience falls short by MORE than the buffer.
     """
     result = []
     for job, score in scored_jobs:
@@ -21,6 +24,15 @@ def apply_hard_filters(
                 if job.salary_min and int(float(job.salary_min)) < min_salary:
                     continue
             except ValueError:
-                pass  # unparseable salary — don't filter it out over bad data
+                pass
+
+        if candidate_years_experience is not None and job.min_years_required:
+            try:
+                required = float(job.min_years_required)
+                if candidate_years_experience < (required - experience_buffer):
+                    continue
+            except ValueError:
+                pass  # unparseable — don't filter over bad data
+
         result.append((job, score))
     return result

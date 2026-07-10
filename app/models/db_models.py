@@ -36,6 +36,7 @@ class JobRecord(Base):
     source = Column(String, nullable=False, default="adzuna")
     embedding = Column(Text, nullable=True)              # JSON-serialized vector, cached
     fetched_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    min_years_required = Column(String, nullable=True)
 
 class MatchResult(Base):
     __tablename__ = "match_results"
