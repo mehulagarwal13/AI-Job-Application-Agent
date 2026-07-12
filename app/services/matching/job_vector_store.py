@@ -1,44 +1,35 @@
-from qdrant_client.models import PointStruct
-from app.core.qdrant_client import client, COLLECTION_NAME
+"""
+Vector search over jobs — pgvector on Neon.
+
+Replaces the previous Qdrant-backed implementation. Vectors live in the
+jobs.embedding_vector column (see app/models/db_models.py), indexed with HNSW.
+Similarity search is a single SQL query — no external vector service, no
+separate ID mapping, and results arrive as full JobRecord rows already.
+"""
+
+from sqlalchemy.orm import Session
+
+from app.models.db_models import JobRecord
 
 
-def upsert_job_vector(job_id: str, vector: list[float]) -> None:
+def search_similar_jobs(
+    db: Session,
+    query_vector: list[float],
+    top_n: int = 40,
+) -> list[tuple[JobRecord, float]]:
     """
-    Stores/updates a job's embedding in Qdrant.
-    Qdrant's point IDs must be int or UUID — we use the job_id string as the
-    payload, and a stable hash of it as the point ID.
+    Returns [(JobRecord, similarity_score)] sorted by similarity descending.
+
+    pgvector's <=> operator is cosine *distance*; similarity = 1 - distance.
+    Embeddings are normalized, so this is equivalent to dot-product ranking.
     """
-    point_id = _job_id_to_point_id(job_id)
-    client.upsert(
-        collection_name=COLLECTION_NAME,
-        points=[
-            PointStruct(
-                id=point_id,
-                vector=vector,
-                payload={"job_id": job_id},
-            )
-        ],
+    distance = JobRecord.embedding_vector.cosine_distance(query_vector)
+
+    rows = (
+        db.query(JobRecord, (1 - distance).label("similarity"))
+        .filter(JobRecord.embedding_vector.isnot(None))
+        .order_by(distance)
+        .limit(top_n)
+        .all()
     )
-
-
-def _job_id_to_point_id(job_id: str) -> str:
-    """
-    Qdrant point IDs must be unsigned int or UUID.
-    Our job_ids look like 'adzuna_12345' — not a valid UUID —
-    so we deterministically derive a UUID from it instead.
-    Same job_id always maps to the same point_id, so upserts are idempotent.
-    """
-    import uuid
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, job_id))
-
-
-def search_similar_jobs(query_vector: list[float], top_n: int = 40) -> list[tuple[str, float]]:
-    """
-    Returns list of (job_id, similarity_score) sorted by similarity descending.
-    """
-    results = client.search(
-        collection_name=COLLECTION_NAME,
-        query_vector=query_vector,
-        limit=top_n,
-    )
-    return [(hit.payload["job_id"], hit.score) for hit in results]
+    return [(job, float(similarity)) for job, similarity in rows]

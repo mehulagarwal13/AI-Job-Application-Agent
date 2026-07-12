@@ -1,5 +1,4 @@
 import uuid
-import json
 from sqlalchemy.orm import Session
 from app.models.db_models import MatchResult
 
@@ -22,16 +21,16 @@ def save_match_results(db: Session, resume_id: str, ranked_jobs: list[dict]) -> 
             match_id=str(uuid.uuid4()),
             resume_id=resume_id,
             job_id=job["job_id"],
-            vector_similarity=str(job["vector_similarity"]),
-            skill_overlap_ratio=str(job["skill_overlap_ratio"]),
-            blended_score=str(job["blended_score"]),
-            matched_skills=json.dumps(job["matched_skills"]),
-            missing_skills=json.dumps(job["missing_skills"]),
+            vector_similarity=job["vector_similarity"],
+            skill_overlap_ratio=job["skill_overlap_ratio"],
+            blended_score=job["blended_score"],
+            matched_skills=job["matched_skills"],
+            missing_skills=job["missing_skills"],
             explanation=job["explanation"],
-            ats_score=str(job["ats_score"]),
-            ats_found_keywords=json.dumps(job["ats_found_keywords"]),
-            ats_missing_keywords=json.dumps(job["ats_missing_keywords"]),
-            ats_format_score=str(job["ats_format_score"]),
+            ats_score=job["ats_score"],
+            ats_found_keywords=job["ats_found_keywords"],
+            ats_missing_keywords=job["ats_missing_keywords"],
+            ats_format_score=job["ats_format_score"],
             status="new",
         )
         db.add(record)
@@ -48,6 +47,10 @@ def get_matches_for_resume(db: Session, resume_id: str, status: str | None = Non
     if status:
         query = query.filter(MatchResult.status == status)
     return query.order_by(MatchResult.blended_score.desc()).all()
+
+
+def get_match_by_id(db: Session, match_id: str) -> MatchResult | None:
+    return db.query(MatchResult).filter(MatchResult.match_id == match_id).first()
 
 
 def update_match_status(db: Session, match_id: str, new_status: str) -> MatchResult | None:

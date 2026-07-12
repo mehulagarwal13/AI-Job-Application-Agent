@@ -1,16 +1,9 @@
 import json
 import re
-from openai import OpenAI
-from app.core.config import OPENAI_API_KEY
 from pydantic import ValidationError
 
+from app.ai.llm import llm_router
 from app.models.parsed_resume import ParsedResume
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-)
-
-MODEL = "gpt-4.1-mini"
 
 SYSTEM_PROMPT = """You are a precise resume-parsing engine. You extract only information explicitly present in the resume text.
 
@@ -79,17 +72,11 @@ def _call_llm(resume_text: str, strict_followup: bool = False) -> str:
             "no markdown, no commentary.\n\n" + user_prompt
         )
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        max_completion_tokens=2000,
-        response_format={"type": "json_object"},
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
+    return llm_router.run(
+        task="resume_parse",
+        system=SYSTEM_PROMPT,
+        prompt=user_prompt,
     )
-
-    return response.choices[0].message.content
 
 
 def parse_resume_text(resume_text: str) -> tuple[ParsedResume, float]:

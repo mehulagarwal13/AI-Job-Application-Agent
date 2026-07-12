@@ -15,10 +15,11 @@ A GenAI-powered backend that takes a resume, understands it, and finds real jobs
 | API framework | FastAPI + Uvicorn | REST endpoints, async upload handling |
 | Relational DB | **Neon** (serverless cloud PostgreSQL) + SQLAlchemy ORM | Resumes, jobs, match results |
 | Migrations | Alembic | Schema versioning |
-| Vector DB | Qdrant Cloud | Fast similarity search over job embeddings |
-| LLM | OpenAI `gpt-4.1-mini` | Resume parsing, job-fit analysis |
+| Vector search | **pgvector on Neon** (HNSW index) | Similarity search over job embeddings — same DB as relational data, no extra service |
+| LLM | OpenAI via a provider-agnostic **LLM Router** (`app/ai/llm/`) | Resume parsing, job-fit analysis; task→model routing is pure config |
 | Embeddings | sentence-transformers `all-MiniLM-L6-v2` (local, free) | 384-dim semantic vectors |
-| Job source | Adzuna API | Live job listings (multi-country) |
+| Job sources | Plugin connectors: **Adzuna** (key), **Remotive** + **Arbeitnow** (free, keyless) | Live job listings, cross-source deduplicated |
+| Scheduler | APScheduler | Optional automatic job sync (opt-in via `JOB_SYNC_QUERIES`) |
 | File parsing | pdfplumber (PDF), python-docx (DOCX) | Text extraction |
 
 ---
@@ -32,7 +33,7 @@ All keys live in `.env` (never commit it — see `.env.example` for the template
 | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com) | `app/services/resume_parser.py`, `app/services/matching/job_skill_extractor.py` | LLM calls: parsing resume text into structured JSON, and analyzing each job description (required skills, ATS keywords, fit explanation) |
 | `ADZUNA_APP_ID` + `ADZUNA_APP_KEY` | [developer.adzuna.com](https://developer.adzuna.com) (free tier) | `app/services/job_sources/adzuna_client.py` | Fetching live job listings by search query, country, and location |
 | `DATABASE_URL` | [neon.tech](https://neon.tech) → project → **Connect** | `app/core/database.py`, `alembic/env.py` | Neon cloud Postgres connection (must include `?sslmode=require`) |
-| `QDRANT_URL` + `QDRANT_API_KEY` | [cloud.qdrant.io](https://cloud.qdrant.io) (free tier) | `app/core/qdrant_client.py`, `app/services/matching/job_vector_store.py` | Storing job vectors and running indexed similarity search |
+| *(no vector DB key)* | — | `app/core/pgvector_setup.py`, `app/services/matching/job_vector_store.py` | Vector storage & search run inside Neon via the pgvector extension — enabled automatically at startup |
 
 Note: embeddings are generated **locally** by sentence-transformers — no API key or cost involved.
 
@@ -74,27 +75,30 @@ The response is validated against the Pydantic schema, then normalized (`normali
 
 A compact summary text is built from the parsed data, then encoded by `all-MiniLM-L6-v2` into a **normalized 384-dim vector** (normalized so cosine similarity is a plain dot product). Cached in the DB — computed once per resume.
 
-### Stage 5 — Job Scraping & Ingestion
-`POST /jobs/ingest?query=...&country=...&location=...` · `app/services/job_sources/`
+### Stage 5 — Job Scraping & Ingestion (multi-source)
+`POST /jobs/ingest?query=...&sources=all&country=...` · `app/services/job_sources/`, `app/services/job_ingestion.py`
 
-1. `adzuna_client.py` queries the Adzuna search API (any country code: `in`, `us`, `gb`, ...).
-2. `adzuna_normalizer.py` maps raw listings to a clean internal shape: title, company, location, description, salary range, remote flag, apply URL.
-3. `experience_extractor.py` parses "X+ years" style requirements out of the description → `min_years_required` (used later for hard filtering).
-4. Incomplete listings (no title/description) are skipped; the rest are **upserted** by Adzuna job ID, so re-ingesting never duplicates.
+Every source implements the same `JobSource` contract (`base.py`) and returns one normalized shape. Registered connectors (`GET /jobs/sources` lists them):
 
-The job source layer is deliberately isolated in `job_sources/` — adding LinkedIn, Indeed, or Naukri later means adding one client + one normalizer, nothing else changes.
+1. **Adzuna** — keyed API, any country (`in`, `us`, `gb`, ...), salary data.
+2. **Remotive** — free/keyless, remote-only listings.
+3. **Arbeitnow** — free/keyless, Europe/remote-heavy (client-side term filtering).
+
+The shared ingestion service then: skips incomplete listings → computes a **cross-source dedup key** (`sha1(title|company)` — the same role on two boards is stored once) → parses "X+ years" requirements (`experience_extractor.py`) → upserts by source job ID. One failing source never aborts the others; per-source stats are returned.
+
+**Optional auto-sync** (`app/core/scheduler.py`): set `JOB_SYNC_QUERIES=backend engineer;data scientist` in `.env` and APScheduler re-ingests and re-embeds every `JOB_SYNC_INTERVAL_HOURS` (default 6) — the job pool stays fresh with zero manual calls. Adding LinkedIn/Indeed/Naukri later = one connector file + one registry line.
 
 ### Stage 6 — Job Embedding & Vector Indexing
 `POST /jobs/embed-pending` · `app/services/matching/job_vector_store.py`
 
-Every not-yet-embedded job gets a summary text → 384-dim vector → **upserted into Qdrant Cloud** with the job ID as payload. Qdrant provides indexed approximate-nearest-neighbor search, so matching stays fast even with tens of thousands of jobs.
+Every not-yet-embedded job gets a summary text → 384-dim vector → stored in the **`jobs.embedding_vector` pgvector column** on Neon, covered by an **HNSW index** (approximate nearest-neighbor, cosine distance). Vectors live next to the relational data — one database, one connection string, no sync between systems.
 
 ### Stage 7 — Matching Engine
 `POST /resumes/{resume_id}/matches/generate` · `app/services/matching/`
 
 Four sub-steps, funnel-shaped (cheap & broad → expensive & precise):
 
-1. **Retrieval** (`retrieval.py`): resume vector → Qdrant → top-40 semantically similar jobs, joined with full records from Neon.
+1. **Retrieval** (`retrieval.py`): resume vector → single pgvector SQL query → top-40 semantically similar jobs as full records (the old two-step "search vector DB, then fetch rows" is gone).
 2. **Hard filters** (`hard_filters.py`): drop jobs failing concrete rules — location mismatch, salary below the requested minimum, or `min_years_required` above the candidate's experience. Pool trimmed to 15.
 3. **Deep analysis** (per job): the LLM extracts required skills + ATS keywords from the job description (`job_skill_extractor.py`); `skill_gap.py` computes matched/missing skills and an overlap ratio against the candidate's skills; `ats/ats_scorer.py` checks the ATS keywords against the raw resume text and scores format.
 4. **Blended ranking** (`ranker.py`):
@@ -118,16 +122,23 @@ The `missing_skills` per match are the direct input for the upcoming **resume ta
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/resumes/upload` | Upload PDF/DOCX (dedup by hash, auto-extracts in background) |
-| `POST` | `/resumes/{id}/extract?force=` | Extract raw text (idempotent; GET alias kept, deprecated) |
+| `POST` | `/auth/signup` | Create account (email + password, returns JWT) |
+| `POST` | `/auth/login` | OAuth2 password login (returns JWT) |
+| `GET` | `/auth/me` | Current user info |
+| `GET` | `/resumes` | Current user's resumes (session restore) |
+| `POST` | `/resumes/upload` | Upload PDF/DOCX (per-user dedup, auto-extracts in background) |
+| `POST` | `/resumes/{id}/extract?force=` | Extract raw text (idempotent; runs automatically on upload) |
 | `POST` | `/resumes/{id}/parse` | LLM → structured resume JSON |
 | `POST` | `/resumes/{id}/embed` | Generate resume vector |
 | `GET` | `/resumes/{id}/shortlist?top_n=40` | Raw vector-similarity shortlist (debug/preview) |
 | `POST` | `/resumes/{id}/matches/generate?location_contains=&min_salary=` | Full matching pipeline |
 | `GET` | `/resumes/{id}/matches?status=` | Read stored matches |
 | `PATCH` | `/resumes/matches/{match_id}/status` | Save / dismiss a match |
-| `POST` | `/jobs/ingest?query=&country=&location=&results=` | Scrape jobs from Adzuna |
-| `POST` | `/jobs/embed-pending` | Embed new jobs into Qdrant |
+| `POST` | `/resumes/matches/{match_id}/tailor` | LLM tailoring suggestions for that job (truthful rewrites, ATS keywords, honest gaps) |
+| `POST` | `/resumes/matches/{match_id}/cover-letter` | Job-specific cover letter grounded in the parsed resume |
+| `GET` | `/jobs/sources` | List available job source connectors |
+| `POST` | `/jobs/ingest?query=&sources=&country=&location=&results=` | Scrape jobs from one or all sources (cross-source dedup) |
+| `POST` | `/jobs/embed-pending` | Embed new jobs (pgvector) |
 | `GET` | `/health` | Liveness check |
 
 Interactive docs: `http://localhost:8000/docs` (Swagger, auto-generated).
@@ -160,12 +171,13 @@ pip install -r requirements.txt
 # 4. Configure keys
 copy .env.example .env       # then fill in every key (see API Keys table above)
 
-# 5. Create tables on Neon
-alembic upgrade head
-
-# 6. Run
+# 5. Run — tables, pgvector extension, and indexes are created automatically at startup
 uvicorn app.main:app --reload
 ```
+
+> Note: the files in `alembic/versions/` describe the old (pre-hardening) schema. On a fresh Neon database the app bootstraps the current schema itself. When you next need a migration, delete the old version files and autogenerate a new baseline: `alembic revision --autogenerate -m "baseline"`.
+
+Run the test suite with `pytest`.
 
 Typical first workflow: `POST /jobs/ingest` → `POST /jobs/embed-pending` → `POST /resumes/upload` → `/extract` → `/parse` → `/embed` → `/matches/generate`.
 
@@ -189,6 +201,17 @@ Typical first workflow: `POST /jobs/ingest` → `POST /jobs/embed-pending` → `
 
 **More job sources**: the `job_sources/` layer is built for it — LinkedIn/Indeed/Naukri clients plug in beside Adzuna.
 
+**Resume tailoring & cover letters — DONE**: `POST /resumes/matches/{id}/tailor` returns a job-targeted summary, bullet rewrites, truthfully surfaceable skills (with evidence), ATS keywords to weave in, and honest gaps with learning suggestions. `POST /resumes/matches/{id}/cover-letter` writes a 250-350 word letter grounded strictly in the parsed resume. Both run on the premium model tier via the LLM Router and are prompt-constrained to never fabricate experience.
+
+**Performance**: job-fit LLM analyses run in parallel (5 concurrent) during matching; the embedding model lazy-loads on first use.
+
+**Production architecture — DONE**:
+- **Schema hardening**: scores/salaries/experience are real `Float` columns (correct sorting & filtering), skills/keywords are `JSONB` (queryable), `match_results` has proper foreign keys with `ON DELETE CASCADE`, and resume embeddings live in pgvector alongside job vectors.
+- **Auth**: set `API_KEY` in `.env` → every endpoint requires `X-API-Key` (timing-safe comparison); unset = open local dev.
+- **Rate limiting**: per-IP sliding window (default 60 req/min, `RATE_LIMIT_PER_MINUTE`).
+- **Observability**: request logging with latency, global error handler (no stack traces leak), `/health` checks DB reachability.
+- **Tests**: `pytest` suite covering skill-gap scoring, hard filters, experience extraction, text cleaning, dedup keys, and the LLM router (routing, retries, overrides).
+
 **Roadmap**:
-1. **Resume tailoring** — for near-miss jobs, use `missing_skills` + the job description to suggest targeted resume rewrites.
-2. **Auto-apply** — agent applies to saved matches automatically via the stored `apply_url`.
+1. **Auto-apply** — agent applies to saved matches automatically via the stored `apply_url`, submitting the tailored resume.
+2. **File storage** — move resumes from local disk to object storage (S3-compatible) before cloud deployment.

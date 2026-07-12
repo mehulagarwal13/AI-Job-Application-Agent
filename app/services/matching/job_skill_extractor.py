@@ -1,11 +1,7 @@
 import json
 import re
-from openai import OpenAI
-from app.core.config import OPENAI_API_KEY
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-MODEL = "gpt-4.1-mini"
+from app.ai.llm import llm_router
 
 
 SYSTEM_PROMPT = """You analyze a job description against a candidate's resume summary.
@@ -64,24 +60,11 @@ Respond with ONLY this JSON shape:
 """
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            temperature=0,
-            max_completion_tokens=500,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
+        raw = llm_router.run(
+            task="job_fit_analysis",
+            system=SYSTEM_PROMPT,
+            prompt=prompt,
         )
-
-        raw = response.choices[0].message.content
 
         raw = _strip_fences(raw)
 

@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from app.models.db_models import JobRecord
 from app.models.parsed_resume import ParsedResume
 from app.services.matching.hard_filters import apply_hard_filters
@@ -8,9 +10,8 @@ from app.services.ats.ats_scorer import compute_ats_score
 VECTOR_WEIGHT = 0.6
 SKILL_WEIGHT = 0.4
 RERANK_POOL_SIZE = 15
+LLM_CONCURRENCY = 5  # parallel job-fit analyses; analyze_job_fit degrades safely per job
 
-
-from app.services.ats.ats_scorer import compute_ats_score
 
 def rank_jobs(
     shortlist: list[tuple[JobRecord, float]],
@@ -28,9 +29,17 @@ def rank_jobs(
     )
     top_pool = filtered[:RERANK_POOL_SIZE]
 
+    # The LLM analysis is the slow step (one call per job). Run them in parallel —
+    # order is preserved by executor.map, and analyze_job_fit already returns a
+    # safe fallback per job on failure, so one bad call can't break the batch.
+    with ThreadPoolExecutor(max_workers=LLM_CONCURRENCY) as executor:
+        analyses = list(executor.map(
+            lambda item: analyze_job_fit(resume_summary_text, item[0].title, item[0].description or ""),
+            top_pool,
+        ))
+
     results = []
-    for job, vector_score in top_pool:
-        analysis = analyze_job_fit(resume_summary_text, job.title, job.description or "")
+    for (job, vector_score), analysis in zip(top_pool, analyses):
         gap = compute_skill_gap(parsed_resume.skills, parsed_resume.inferred_skills, analysis["required_skills"])
         ats = compute_ats_score(resume_raw_text, analysis["ats_keywords"])
 

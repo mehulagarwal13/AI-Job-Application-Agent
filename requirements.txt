@@ -5,13 +5,17 @@ pydantic
 pdfplumber
 python-docx
 sqlalchemy
-anthropic
+openai
 python-dotenv
 sentence-transformers
 httpx
 psycopg2-binary
 alembic
-qdrant-client==1.9.2
+pgvector
+apscheduler>=3.10,<4.0
+pyjwt
+email-validator
+pytest
 
 # --- Optional: OCR fallback for scanned/image PDFs ---
 # Uncomment the two lines below AND install the Tesseract engine binary
